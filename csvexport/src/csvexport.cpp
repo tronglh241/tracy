@@ -15,6 +15,7 @@
 
 #include "../../server/TracyFileRead.hpp"
 #include "../../server/TracyWorker.hpp"
+#include "../../server/TracyEvent.hpp"
 #include "../../getopt/getopt.h"
 
 void print_usage_exit(int e)
@@ -29,6 +30,7 @@ void print_usage_exit(int e)
     fprintf(stderr, "  -c, --case        Case sensitive filtering\n");
     fprintf(stderr, "  -e, --self        Get self times\n");
     fprintf(stderr, "  -u, --unwrap      Report each zone event\n");
+    fprintf(stderr, "  -x, --extra       Report extra name\n");
     fprintf(stderr, "  -m, --messages    Report only messages\n");
 
     exit(e);
@@ -41,6 +43,7 @@ struct Args {
     bool case_sensitive;
     bool self_time;
     bool unwrap;
+    bool extra;
     bool unwrapMessages;
 };
 
@@ -51,7 +54,7 @@ Args parse_args(int argc, char** argv)
         print_usage_exit(1);
     }
 
-    Args args = { "", ",", "", false, false, false, false };
+    Args args = { "", ",", "", false, false, false, false, false };
 
     struct option long_opts[] = {
         { "help", no_argument, NULL, 'h' },
@@ -60,12 +63,13 @@ Args parse_args(int argc, char** argv)
         { "case", no_argument, NULL, 'c' },
         { "self", no_argument, NULL, 'e' },
         { "unwrap", no_argument, NULL, 'u' },
+        { "extra", no_argument, NULL, 'x' },
         { "messages", no_argument, NULL, 'm' },
         { NULL, 0, NULL, 0 }
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "hf:s:ceum", long_opts, NULL)) != -1)
+    while ((c = getopt_long(argc, argv, "hf:s:ceuxm", long_opts, NULL)) != -1)
     {
         switch (c)
         {
@@ -86,6 +90,9 @@ Args parse_args(int argc, char** argv)
             break;
         case 'u':
             args.unwrap = true;
+            break;
+        case 'x':
+            args.extra = true;
             break;
         case 'm':
             args.unwrapMessages = true;
@@ -137,6 +144,14 @@ const char* get_name(int32_t id, const tracy::Worker& worker)
 {
     auto& srcloc = worker.GetSourceLocation(id);
     return worker.GetString(srcloc.name.active ? srcloc.name : srcloc.function);
+}
+
+const char* get_name(const tracy::ZoneEvent& ev, const tracy::Worker& worker)
+{
+    if (worker.HasZoneExtra(ev) && worker.GetZoneExtra(ev).name.Active())
+        return worker.GetString(worker.GetZoneExtra(ev).name);
+    else
+        return "";
 }
 
 template <typename T>
@@ -269,9 +284,14 @@ int main(int argc, char** argv)
     std::vector<const char*> columns;
     if (args.unwrap)
     {
-        columns = {
-            "name", "src_file", "src_line", "ns_since_start", "exec_time_ns", "thread"
-        };
+        if (!args.extra)
+            columns = {
+                "name", "src_file", "src_line", "ns_since_start", "exec_time_ns", "thread"
+            };
+        else
+            columns = {
+                "name", "name extra", "src_file", "src_line", "ns_since_start", "exec_time_ns", "thread"
+            };
     }
     else
     {
@@ -291,8 +311,8 @@ int main(int argc, char** argv)
         values[0] = get_name(it->first, worker);
 
         const auto& srcloc = worker.GetSourceLocation(it->first);
-        values[1] = worker.GetString(srcloc.file);
-        values[2] = std::to_string(srcloc.line);
+        values[1 + int(args.extra)] = worker.GetString(srcloc.file);
+        values[2 + int(args.extra)] = std::to_string(srcloc.line);
 
         const auto& zone_data = it->second;
 
@@ -305,14 +325,17 @@ int main(int argc, char** argv)
                 const auto start = zone_event->Start();
                 const auto end = zone_event->End();
 
-                values[3] = std::to_string(start);
+                if (args.extra)
+                    values[1] = get_name(*zone_event, worker);
+
+                values[3 + int(args.extra)] = std::to_string(start);
 
                 auto timespan = end - start;
                 if (args.self_time) {
                     timespan -= GetZoneChildTimeFast(worker, *zone_event);
                 }
-                values[4] = std::to_string(timespan);
-                values[5] = std::to_string(tId);
+                values[4 + int(args.extra)] = std::to_string(timespan);
+                values[5 + int(args.extra)] = std::to_string(tId);
 
                 std::string row = join(values, args.separator);
                 printf("%s\n", row.data());
@@ -321,19 +344,19 @@ int main(int argc, char** argv)
         else
         {
             const auto time = args.self_time ? zone_data.selfTotal : zone_data.total;
-            values[3] = std::to_string(time);
-            values[4] = std::to_string(100. * time / last_time);
+            values[3 + int(args.extra)] = std::to_string(time);
+            values[4 + int(args.extra)] = std::to_string(100. * time / last_time);
 
-            values[5] = std::to_string(zone_data.zones.size());
+            values[5 + int(args.extra)] = std::to_string(zone_data.zones.size());
 
             const auto avg = (args.self_time ? zone_data.selfTotal : zone_data.total)
                 / zone_data.zones.size();
-            values[6] = std::to_string(avg);
+            values[6 + int(args.extra)] = std::to_string(avg);
 
             const auto tmin = args.self_time ? zone_data.selfMin : zone_data.min;
             const auto tmax = args.self_time ? zone_data.selfMax : zone_data.max;
-            values[7] = std::to_string(tmin);
-            values[8] = std::to_string(tmax);
+            values[7 + int(args.extra)] = std::to_string(tmin);
+            values[8 + int(args.extra)] = std::to_string(tmax);
 
             const auto sz = zone_data.zones.size();
             const auto ss = zone_data.sumSq
